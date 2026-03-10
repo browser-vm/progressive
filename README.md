@@ -1,36 +1,114 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Progressive Image Viewer
+
+A modern, responsive web application featuring progressive image loading tied to user zoom interactions, enveloped in a sleek iOS-inspired glassmorphism UI.
+
+![Progressive Image Viewer](https://img.shields.io/badge/Next.js-16-black) ![TypeScript](https://img.shields.io/badge/TypeScript-5-blue) ![Tailwind CSS](https://img.shields.io/badge/Tailwind-4-cyan)
+
+## Features
+
+- **Progressive Image Loading**: Image detail enhances as you zoom in using a multi-resolution quality tier system
+- **Two Input Methods**: 
+  - Direct local file uploads (supports files up to 500MB)
+  - Remote URL inputs via Image-to-WebP Optimizer API
+- **iOS-Inspired Design**: Modern glassmorphism UI with blur effects and smooth animations
+- **Responsive Layout**: Works on desktop and mobile devices
+- **Zoom Controls**: Mouse wheel, slider, and button controls for intuitive zoom interaction
 
 ## Getting Started
 
-First, run the development server:
+### Prerequisites
+
+- Node.js 18+ 
+- pnpm (or npm/yarn/bun)
+
+### Installation
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+# Install dependencies
+pnpm install
+
+# Copy environment file
+cp .env.example .env.local
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### Configuration
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Edit `.env.local` and set your Image-to-WebP Optimizer API URL:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```env
+NEXT_PUBLIC_IMAGE_OPTIMIZER_API=https://your-workspace--image-to-webp-optimizer-optimize-image.modal.run
+```
 
-## Learn More
+> **Note**: You'll need to deploy your own Image-to-WebP Optimizer API using Modal or similar service. See the `openapi.yaml` for API specifications.
 
-To learn more about Next.js, take a look at the following resources:
+### Development
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+pnpm dev
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-## Deploy on Vercel
+### Production Build
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```bash
+pnpm build
+pnpm start
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Usage
+
+### Upload Local File
+
+1. Click the "Upload" tab
+2. Drag and drop an image file or click to browse
+3. The image loads with a blur effect at low quality
+4. Use mouse wheel, slider, or +/- buttons to zoom in
+5. As zoom increases, quality progressively improves
+
+### Load from URL
+
+1. Click the "URL" tab
+2. Enter the image URL
+3. Click "Optimize & Load"
+4. The image is processed through the WebP Optimizer API
+5. View and zoom as with local files
+
+## Quality Tiers
+
+The progressive rendering engine uses three quality tiers based on zoom level:
+
+| Zoom Level | Quality | Blur | Badge |
+|------------|---------|------|-------|
+| 0.5x - 1.5x | Low | 2px | Preview |
+| 1.5x - 3x | Medium | 1px | SD |
+| 3x+ | High | 0px | HD |
+
+## Tech Stack
+
+- **Framework**: Next.js 16
+- **Language**: TypeScript
+- **Styling**: Tailwind CSS 4
+- **State Management**: React Hooks
+- **API**: REST (Image-to-WebP Optimizer)
+
+## Project Structure
+
+```
+progressive/
+├── app/
+│   ├── globals.css       # Global styles with glassmorphism
+│   ├── layout.tsx        # Root layout
+│   ├── page.tsx          # Main application page
+│   ├── hooks/
+│   │   └── useProgressiveImage.ts  # Progressive rendering hook
+│   └── lib/
+│       └── types.ts      # TypeScript types
+├── .env.local            # Local environment variables
+├── .env.example          # Environment template
+└── openapi.yaml          # API specification
+```
+
+## License
+
+MIT
