@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useMemo } from "react";
 import { useProgressiveImage } from "./hooks/useProgressiveImage";
+import { LoadingProgress } from "./lib/types";
 
 type InputMode = "file" | "url";
 
@@ -11,22 +12,33 @@ interface ProcessingState {
   message: string;
 }
 
+// Helper function to get loading message
+const getLoadingMessage = (progress: LoadingProgress): string => {
+  switch (progress.phase) {
+    case "fetching":
+      return `Fetching image... ${progress.percent.toFixed(0)}%`;
+    case "decoding":
+      return "Decoding image...";
+    case "buffering":
+      return `Creating ${progress.currentQuality} quality buffer...`;
+    case "complete":
+      return "Image loaded";
+    default:
+      return "Loading...";
+  }
+};
+
 export default function Home() {
   // Input state
   const [inputMode, setInputMode] = useState<InputMode>("file");
   const [urlInput, setUrlInput] = useState("");
   const [isDragging, setIsDragging] = useState(false);
-  const [processing, setProcessing] = useState<ProcessingState>({
-    isProcessing: false,
-    progress: 0,
-    message: "",
-  });
 
   // Refs
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageContainerRef = useRef<HTMLDivElement>(null);
 
-  // Use progressive image hook
+  // Use progressive image hook with advanced buffering
   const {
     imageState,
     zoomState,
@@ -39,26 +51,24 @@ export default function Home() {
     setZoom,
     handleWheelZoom,
     currentQuality,
+    loadingProgress,
+    preloadState,
+    memoryUsage,
   } = useProgressiveImage();
 
   // Get API URL from environment
   const apiUrl = process.env.NEXT_PUBLIC_IMAGE_OPTIMIZER_API;
 
+  // Compute processing state from loading progress
+  const processing: ProcessingState = useMemo(() => ({
+    isProcessing: imageState.isLoading,
+    progress: loadingProgress?.percent || 0,
+    message: loadingProgress ? getLoadingMessage(loadingProgress) : "",
+  }), [imageState.isLoading, loadingProgress]);
+
   // Handle file selection
   const handleFileSelect = useCallback(async (file: File) => {
-    setProcessing({
-      isProcessing: true,
-      progress: 30,
-      message: "Loading image...",
-    });
-    
     await loadFromFile(file);
-    
-    setProcessing({
-      isProcessing: false,
-      progress: 100,
-      message: "",
-    });
   }, [loadFromFile]);
 
   // Handle URL submission with processing state
@@ -66,19 +76,7 @@ export default function Home() {
     if (!urlInput.trim()) return;
     if (!apiUrl) return;
 
-    setProcessing({
-      isProcessing: true,
-      progress: 10,
-      message: "Optimizing image...",
-    });
-
     await loadFromUrl(urlInput.trim(), apiUrl);
-
-    setProcessing({
-      isProcessing: false,
-      progress: 100,
-      message: "",
-    });
   }, [urlInput, apiUrl, loadFromUrl]);
 
   // Handle drag and drop
@@ -325,6 +323,19 @@ export default function Home() {
                     <span>Loaded Tiers</span>
                     <span className="text-blue-400">
                       {[...imageState.loadedQualities].join(", ")}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Buffer Memory</span>
+                    <span className="text-cyan-400">
+                      {memoryUsage.toFixed(2)} MB
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Preload Direction</span>
+                    <span className="text-purple-400">
+                      {preloadState.direction === "in" ? "↑ Zoom In" : 
+                       preloadState.direction === "out" ? "↓ Zoom Out" : "— Idle"}
                     </span>
                   </div>
                 </div>

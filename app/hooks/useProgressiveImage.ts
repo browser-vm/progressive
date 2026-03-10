@@ -1,34 +1,43 @@
-import { useState, useCallback, useEffect, useRef } from "react";
-import { 
-  QualityLevel, 
-  ImageSource, 
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
+import {
+  QualityLevel,
+  ImageSource,
   ProgressiveImageState,
   ZoomState,
   QUALITY_THRESHOLDS,
-  MAX_FILE_SIZE
+  MAX_FILE_SIZE,
+  LoadingProgress,
+  PredictivePreloadState,
 } from "../lib/types";
+import { BufferPool } from "../lib/bufferPool";
+import { ImageBufferManager } from "../lib/imageBufferManager";
 
 interface UseProgressiveImageReturn {
   // State
   imageState: ProgressiveImageState;
   zoomState: ZoomState;
-  
+  loadingProgress: LoadingProgress | null;
+  preloadState: PredictivePreloadState;
+
   // Image loading
   loadFromFile: (file: File) => Promise<void>;
   loadFromUrl: (url: string, apiUrl: string) => Promise<void>;
   clearImage: () => void;
-  
+
   // Zoom controls
   zoomIn: () => void;
   zoomOut: () => void;
   resetZoom: () => void;
   setZoom: (level: number) => void;
   handleWheelZoom: (delta: number) => void;
-  
+
   // Computed
   currentQuality: QualityLevel;
   canZoomIn: boolean;
   canZoomOut: boolean;
+
+  // Buffer info
+  memoryUsage: number;
 }
 
 export function useProgressiveImage(): UseProgressiveImageReturn {
@@ -47,8 +56,43 @@ export function useProgressiveImage(): UseProgressiveImageReturn {
     max: 10,
   });
 
-  // Refs
-  const abortControllerRef = useRef<AbortController | null>(null);
+  // Loading progress
+  const [loadingProgress, setLoadingProgress] = useState<LoadingProgress | null>(null);
+
+  // Preload state
+  const [preloadState, setPreloadState] = useState<PredictivePreloadState>({
+    direction: "idle",
+    predictedQuality: "low",
+    preloadQueued: false,
+    lastZoomVelocity: 0,
+  });
+
+  // Refs for managers
+  const bufferPoolRef = useRef<BufferPool | null>(null);
+  const bufferManagerRef = useRef<ImageBufferManager | null>(null);
+  const lastZoomRef = useRef<number>(1);
+  const zoomHistoryRef = useRef<number[]>([]);
+
+  // Initialize buffer pool and manager
+  useEffect(() => {
+    bufferPoolRef.current = new BufferPool();
+    bufferManagerRef.current = new ImageBufferManager(bufferPoolRef.current);
+
+    // Set up progress callback
+    bufferManagerRef.current.onProgress((progress) => {
+      setLoadingProgress(progress);
+    });
+
+    // Set up preload callback
+    bufferManagerRef.current.onPreload((quality) => {
+      console.log(`Preloading quality: ${quality}`);
+      // In a real implementation, this would trigger actual loading
+    });
+
+    return () => {
+      bufferManagerRef.current?.dispose();
+    };
+  }, []);
 
   // Determine quality level from zoom
   const getQualityFromZoom = useCallback((zoom: number): QualityLevel => {
@@ -57,7 +101,32 @@ export function useProgressiveImage(): UseProgressiveImageReturn {
     return "low";
   }, []);
 
-  // Load image from local file
+  // Track zoom direction for predictive preloading
+  const trackZoomDirection = useCallback((newZoom: number, oldZoom: number) => {
+    const direction = newZoom > oldZoom ? "in" : newZoom < oldZoom ? "out" : "idle";
+    const velocity = Math.abs(newZoom - oldZoom);
+
+    // Track zoom history for velocity calculation
+    zoomHistoryRef.current.push(velocity);
+    if (zoomHistoryRef.current.length > 5) {
+      zoomHistoryRef.current.shift();
+    }
+
+    const avgVelocity = zoomHistoryRef.current.reduce((a, b) => a + b, 0) / zoomHistoryRef.current.length;
+    const currentQuality = getQualityFromZoom(newZoom);
+
+    // Update preload state
+    bufferManagerRef.current?.updatePreloadPrediction(currentQuality, direction, avgVelocity);
+
+    setPreloadState(bufferManagerRef.current?.getPreloadState() || {
+      direction,
+      predictedQuality: getQualityFromZoom(newZoom),
+      preloadQueued: false,
+      lastZoomVelocity: avgVelocity,
+    });
+  }, [getQualityFromZoom]);
+
+  // Load image from local file with ArrayBuffer
   const loadFromFile = useCallback(async (file: File): Promise<void> => {
     // Validate file size
     if (file.size > MAX_FILE_SIZE) {
@@ -75,58 +144,58 @@ export function useProgressiveImage(): UseProgressiveImageReturn {
       error: null,
     });
 
+    setLoadingProgress({
+      phase: "fetching",
+      percent: 0,
+      bytesLoaded: 0,
+      totalBytes: file.size,
+      currentQuality: "low",
+      bufferedQualities: [],
+      estimatedTimeRemaining: null,
+    });
+
     try {
-      const dataUrl = await new Promise<string>((resolve, reject) => {
+      // Read file as ArrayBuffer for more efficient handling
+      const arrayBuffer = await new Promise<ArrayBuffer>((resolve, reject) => {
         const reader = new FileReader();
-        reader.onload = () => resolve(reader.result as string);
+        reader.onload = () => resolve(reader.result as ArrayBuffer);
         reader.onerror = () => reject(new Error("Failed to read file"));
-        reader.readAsDataURL(file);
+        reader.readAsArrayBuffer(file);
       });
 
-      const img = new Image();
-      await new Promise<void>((resolve, reject) => {
-        img.onload = () => resolve();
-        img.onerror = () => reject(new Error("Failed to load image"));
-        img.src = dataUrl;
-      });
+      const imageId = `file_${Date.now()}`;
 
-      const loadedQualities = new Set<QualityLevel>(["low"]);
-      
-      setImageState({
-        currentSource: {
-          src: dataUrl,
-          quality: "low",
-          width: img.width,
-          height: img.height,
-        },
-        loadedQualities,
-        isLoading: false,
-        error: null,
-      });
+      // Load buffers using the manager
+      await bufferManagerRef.current?.loadFromArrayBuffer(arrayBuffer, file.name, imageId);
 
-      // Pre-load higher quality versions for larger images
-      if (img.width * img.height > 2000 * 2000) {
-        // For large images, we would ideally generate multiple resolution variants
-        // In this implementation, we mark medium as available after a delay
-        setTimeout(() => {
-          setImageState(prev => ({
-            ...prev,
-            loadedQualities: new Set([...prev.loadedQualities, "medium"]),
-          }));
-        }, 1000);
+      // Get the high quality buffer for dimensions
+      const bufferPool = bufferPoolRef.current;
+      const highBuffer = bufferPool?.getBuffer("high");
 
-        setTimeout(() => {
-          setImageState(prev => ({
-            ...prev,
-            loadedQualities: new Set([...prev.loadedQualities, "high"]),
-          }));
-        }, 2000);
-      } else {
-        // Small images get all qualities immediately
-        setImageState(prev => ({
-          ...prev,
-          loadedQualities: new Set(["low", "medium", "high"]),
-        }));
+      if (highBuffer && highBuffer.blobUrl) {
+        const loadedQualities = new Set<QualityLevel>(["low", "medium", "high"]);
+
+        setImageState({
+          currentSource: {
+            src: highBuffer.blobUrl!,
+            quality: "high",
+            width: highBuffer.width,
+            height: highBuffer.height,
+          },
+          loadedQualities,
+          isLoading: false,
+          error: null,
+        });
+
+        setLoadingProgress({
+          phase: "complete",
+          percent: 100,
+          bytesLoaded: file.size,
+          totalBytes: file.size,
+          currentQuality: "high",
+          bufferedQualities: ["low", "medium", "high"],
+          estimatedTimeRemaining: null,
+        });
       }
 
       setZoomState(prev => ({ ...prev, level: 1 }));
@@ -137,16 +206,14 @@ export function useProgressiveImage(): UseProgressiveImageReturn {
         isLoading: false,
         error: err instanceof Error ? err.message : "Failed to load image",
       }));
+      setLoadingProgress(null);
     }
   }, []);
 
   // Load image from URL via API
   const loadFromUrl = useCallback(async (url: string, apiUrl: string): Promise<void> => {
     // Cancel any previous request
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-    }
-    abortControllerRef.current = new AbortController();
+    bufferManagerRef.current?.abort();
 
     setImageState({
       currentSource: null,
@@ -162,7 +229,6 @@ export function useProgressiveImage(): UseProgressiveImageReturn {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ url }),
-        signal: abortControllerRef.current.signal,
       });
 
       if (!response.ok) {
@@ -172,29 +238,39 @@ export function useProgressiveImage(): UseProgressiveImageReturn {
 
       // Get raw Base64 string from response
       const base64String = await response.text();
-      
-      // Convert Base64 to data URL
-      const dataUrl = `data:image/webp;base64,${base64String}`;
-      
-      // Load the image to get dimensions
-      const img = new Image();
-      await new Promise<void>((resolve, reject) => {
-        img.onload = () => resolve();
-        img.onerror = () => reject(new Error("Failed to decode optimized image"));
-        img.src = dataUrl;
-      });
 
-      setImageState({
-        currentSource: {
-          src: dataUrl,
-          quality: "high",
-          width: img.width,
-          height: img.height,
-        },
-        loadedQualities: new Set(["low", "medium", "high"]),
-        isLoading: false,
-        error: null,
-      });
+      // Convert Base64 to ArrayBuffer
+      const binaryString = atob(base64String);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      const arrayBuffer = bytes.buffer;
+
+      const imageId = `url_${Date.now()}`;
+
+      // Load buffers using the manager
+      await bufferManagerRef.current?.loadFromArrayBuffer(arrayBuffer, url, imageId);
+
+      // Get the high quality buffer for dimensions
+      const bufferPool = bufferPoolRef.current;
+      const highBuffer = bufferPool?.getBuffer("high");
+
+      if (highBuffer && highBuffer.blobUrl) {
+        const loadedQualities = new Set<QualityLevel>(["low", "medium", "high"]);
+
+        setImageState({
+          currentSource: {
+            src: highBuffer.blobUrl!,
+            quality: "high",
+            width: highBuffer.width,
+            height: highBuffer.height,
+          },
+          loadedQualities,
+          isLoading: false,
+          error: null,
+        });
+      }
 
       setZoomState(prev => ({ ...prev, level: 1 }));
 
@@ -207,14 +283,14 @@ export function useProgressiveImage(): UseProgressiveImageReturn {
         isLoading: false,
         error: err instanceof Error ? err.message : "Failed to process image",
       }));
+      setLoadingProgress(null);
     }
   }, []);
 
   // Clear image
   const clearImage = useCallback(() => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-    }
+    bufferManagerRef.current?.abort();
+    bufferPoolRef.current?.clearAll();
     setImageState({
       currentSource: null,
       loadedQualities: new Set(),
@@ -222,69 +298,111 @@ export function useProgressiveImage(): UseProgressiveImageReturn {
       error: null,
     });
     setZoomState(prev => ({ ...prev, level: 1 }));
+    setLoadingProgress(null);
+    setPreloadState({
+      direction: "idle",
+      predictedQuality: "low",
+      preloadQueued: false,
+      lastZoomVelocity: 0,
+    });
   }, []);
 
   // Zoom controls
   const zoomIn = useCallback(() => {
-    setZoomState(prev => ({
-      ...prev,
-      level: Math.min(prev.level * 1.5, prev.max),
-    }));
-  }, []);
+    setZoomState(prev => {
+      const newLevel = Math.min(prev.level * 1.5, prev.max);
+      trackZoomDirection(newLevel, prev.level);
+      return {
+        ...prev,
+        level: newLevel,
+      };
+    });
+  }, [trackZoomDirection]);
 
   const zoomOut = useCallback(() => {
-    setZoomState(prev => ({
-      ...prev,
-      level: Math.max(prev.level / 1.5, prev.min),
-    }));
-  }, []);
+    setZoomState(prev => {
+      const newLevel = Math.max(prev.level / 1.5, prev.min);
+      trackZoomDirection(newLevel, prev.level);
+      return {
+        ...prev,
+        level: newLevel,
+      };
+    });
+  }, [trackZoomDirection]);
 
   const resetZoom = useCallback(() => {
-    setZoomState(prev => ({ ...prev, level: 1 }));
-  }, []);
+    setZoomState(prev => {
+      trackZoomDirection(1, prev.level);
+      return { ...prev, level: 1 };
+    });
+  }, [trackZoomDirection]);
 
   const setZoom = useCallback((level: number) => {
-    setZoomState(prev => ({
-      ...prev,
-      level: Math.max(prev.min, Math.min(prev.max, level)),
-    }));
-  }, []);
+    setZoomState(prev => {
+      const newLevel = Math.max(prev.min, Math.min(prev.max, level));
+      trackZoomDirection(newLevel, prev.level);
+      return {
+        ...prev,
+        level: newLevel,
+      };
+    });
+  }, [trackZoomDirection]);
 
   const handleWheelZoom = useCallback((delta: number) => {
     const factor = delta > 0 ? 0.9 : 1.1;
-    setZoomState(prev => ({
-      ...prev,
-      level: Math.max(prev.min, Math.min(prev.max, prev.level * factor)),
-    }));
-  }, []);
+    setZoomState(prev => {
+      const newLevel = Math.max(prev.min, Math.min(prev.max, prev.level * factor));
+      trackZoomDirection(newLevel, prev.level);
+      return {
+        ...prev,
+        level: newLevel,
+      };
+    });
+  }, [trackZoomDirection]);
 
   // Computed values
   const currentQuality = getQualityFromZoom(zoomState.level);
   const canZoomIn = zoomState.level < zoomState.max;
   const canZoomOut = zoomState.level > zoomState.min;
 
-  // Update quality when zoom changes
+  // Memory usage
+  const memoryUsage = useMemo(() => {
+    return bufferPoolRef.current?.getMemoryUsageMB() || 0;
+  }, [imageState]);
+
+  // Update quality when zoom changes - switch to appropriate buffer
   useEffect(() => {
-    if (imageState.currentSource) {
+    if (imageState.currentSource && bufferPoolRef.current) {
       const newQuality = getQualityFromZoom(zoomState.level);
-      setImageState(prev => {
-        if (prev.currentSource && prev.currentSource.quality !== newQuality) {
-          return {
-            ...prev,
-            currentSource: {
-              ...prev.currentSource,
-              quality: newQuality,
-            },
-          };
-        }
-        return prev;
-      });
+      const buffer = bufferPoolRef.current.getBuffer(newQuality);
+
+      if (buffer && buffer.blobUrl && buffer.status === "loaded") {
+        setImageState(prev => {
+          if (prev.currentSource && prev.currentSource.quality !== newQuality) {
+            return {
+              ...prev,
+              currentSource: {
+                ...prev.currentSource,
+                src: buffer.blobUrl!,
+                quality: newQuality,
+                width: buffer.width,
+                height: buffer.height,
+              },
+            };
+          }
+          return prev;
+        });
+      }
     }
+
+    lastZoomRef.current = zoomState.level;
   }, [zoomState.level, getQualityFromZoom, imageState.currentSource]);
 
   return {
     imageState,
     zoomState,
+    loadingProgress,
+    preloadState,
     loadFromFile,
     loadFromUrl,
     clearImage,
@@ -296,5 +414,6 @@ export function useProgressiveImage(): UseProgressiveImageReturn {
     currentQuality,
     canZoomIn,
     canZoomOut,
+    memoryUsage,
   };
 }
