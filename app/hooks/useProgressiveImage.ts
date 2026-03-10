@@ -172,7 +172,7 @@ export function useProgressiveImage(): UseProgressiveImageReturn {
       const bufferPool = bufferPoolRef.current;
       const highBuffer = bufferPool?.getBuffer("high");
 
-      if (highBuffer && highBuffer.blobUrl) {
+      if (highBuffer && highBuffer.blobUrl && highBuffer.width > 0 && highBuffer.height > 0) {
         const loadedQualities = new Set<QualityLevel>(["low", "medium", "high"]);
 
         setImageState({
@@ -196,6 +196,14 @@ export function useProgressiveImage(): UseProgressiveImageReturn {
           bufferedQualities: ["low", "medium", "high"],
           estimatedTimeRemaining: null,
         });
+      } else {
+        // Buffer not properly loaded, show error
+        console.error("Buffer not loaded properly:", highBuffer);
+        setImageState(prev => ({
+          ...prev,
+          isLoading: false,
+          error: "Failed to process image properly",
+        }));
       }
 
       setZoomState(prev => ({ ...prev, level: 1 }));

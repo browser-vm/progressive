@@ -92,7 +92,23 @@ export class ImageBufferManager {
       }
     }
 
-    this.reportProgress("complete", 100, arrayBuffer.byteLength, arrayBuffer.byteLength, "high", qualities);
+    // Only report complete if at least one buffer loaded
+    if (loadedBuffers.length > 0) {
+      const successfullyLoaded = loadedBuffers.filter(b => b && b.quality);
+      const lastLoadedQuality = successfullyLoaded.length > 0 
+        ? successfullyLoaded[successfullyLoaded.length - 1].quality 
+        : "low";
+      this.reportProgress(
+        "complete", 
+        100, 
+        arrayBuffer.byteLength, 
+        arrayBuffer.byteLength, 
+        lastLoadedQuality, 
+        successfullyLoaded.map(b => b.quality)
+      );
+    } else {
+      this.reportProgress("complete", 100, arrayBuffer.byteLength, arrayBuffer.byteLength, "low", []);
+    }
 
     return loadedBuffers;
   }
@@ -273,56 +289,68 @@ export class ImageBufferManager {
    * In a real implementation, this would use canvas or a WASM image processor
    */
   private async processImage(arrayBuffer: ArrayBuffer, quality: QualityLevel): Promise<Blob> {
-    // Create image from buffer
-    const blob = new Blob([arrayBuffer]);
-    const url = URL.createObjectURL(blob);
-    
-    const img = new Image();
-    await new Promise<void>((resolve, reject) => {
-      img.onload = () => resolve();
-      img.onerror = () => reject(new Error("Failed to load image"));
-      img.src = url;
-    });
-
-    // Calculate target dimensions based on quality
-    const scaleFactors: Record<QualityLevel, number> = {
-      low: 0.25,
-      medium: 0.5,
-      high: 1,
-    };
-    
-    const scale = scaleFactors[quality];
-    const targetWidth = Math.round(img.width * scale);
-    const targetHeight = Math.round(img.height * scale);
-
-    // Use canvas to resize
-    const canvas = document.createElement("canvas");
-    canvas.width = targetWidth;
-    canvas.height = targetHeight;
-    
-    const ctx = canvas.getContext("2d");
-    if (!ctx) {
-      throw new Error("Failed to get canvas context");
-    }
-    
-    // Use better scaling for quality
-    ctx.imageSmoothingEnabled = quality !== "low";
-    ctx.imageSmoothingQuality = quality === "high" ? "high" : "medium";
-    ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
-
-    // Convert to blob
     return new Promise((resolve, reject) => {
-      canvas.toBlob(
-        (result) => {
-          if (result) {
-            resolve(result);
-          } else {
-            reject(new Error("Failed to create blob"));
+      // Create image from buffer
+      const blob = new Blob([arrayBuffer]);
+      const url = URL.createObjectURL(blob);
+      
+      const img = new Image();
+      img.onload = () => {
+        try {
+          // Calculate target dimensions based on quality
+          const scaleFactors: Record<QualityLevel, number> = {
+            low: 0.25,
+            medium: 0.5,
+            high: 1,
+          };
+          
+          const scale = scaleFactors[quality];
+          const targetWidth = Math.max(1, Math.round(img.width * scale));
+          const targetHeight = Math.max(1, Math.round(img.height * scale));
+
+          // Use canvas to resize
+          const canvas = document.createElement("canvas");
+          canvas.width = targetWidth;
+          canvas.height = targetHeight;
+          
+          const ctx = canvas.getContext("2d");
+          if (!ctx) {
+            URL.revokeObjectURL(url);
+            reject(new Error("Failed to get canvas context"));
+            return;
           }
-        },
-        "image/webp",
-        quality === "high" ? 0.92 : quality === "medium" ? 0.8 : 0.6
-      );
+          
+          // Use better scaling for quality
+          ctx.imageSmoothingEnabled = quality !== "low";
+          ctx.imageSmoothingQuality = quality === "high" ? "high" : "medium";
+          ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+
+          // Clean up original URL
+          URL.revokeObjectURL(url);
+
+          // Convert to blob
+          canvas.toBlob(
+            (result) => {
+              if (result) {
+                resolve(result);
+              } else {
+                reject(new Error("Failed to create blob"));
+              }
+            },
+            "image/webp",
+            quality === "high" ? 0.92 : quality === "medium" ? 0.8 : 0.6
+          );
+        } catch (err) {
+          URL.revokeObjectURL(url);
+          reject(err);
+        }
+      };
+      
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error("Failed to load image"));
+      };
+      img.src = url;
     });
   }
 
